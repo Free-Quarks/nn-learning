@@ -10,8 +10,8 @@ Created on Sat Jan  9 20:54:01 2021
 # the goal of reproducing a 2D function being the input 
 
 # # first off we impor numpy 
-
-from numpy import array, zeros, exp, random, dot, shape, reshape, meshgrid, transpose, linspace  as np
+# In[1]
+from numpy import array, zeros, exp, random, dot, shape, reshape, meshgrid, transpose, linspace, maximum
 
 import matplotlib.pyplot as plt # for plotting
 import matplotlib
@@ -22,17 +22,18 @@ matplotlib.rcParams['figure.dpi']=300 # highres display
 # # Now we need to initialize some variables and tables for implementing the
 # # higher level functions for the network. 
 
-NumLayers = 4 # This is the number of layers besides the input layer
-LayerSizes = [2,20,40,30,1] # input, 1st hidden, 2nd hid, 3rd hid, and output
+NumLayers = 2 # This is the number of layers besides the input layer
+LayerSizes = [2,200,1] # input, 1st hidden, 2nd hid, 3rd hid, and output
 # I am picking different sizes and more than needed just to get more practice
 
-# Now to initialize the Weights and baises for the network
+# Now to initialize the Weights and baises for the network. Need to be careful with relu since 
+# if any entire vector for df is 0 it can derail the training, hence only random positive to start
 
-Weights = [random.uniform(low= -1, high= +1, size=[LayerSizes[j], LayerSizes[j+1]]) for j in range(NumLayers)]
+Weights = [random.uniform(low=0, high=0.1, size=[LayerSizes[j], LayerSizes[j+1]]) for j in range(NumLayers)]
 # The heavy lifting is done by the size option here, getting several matrix dimensions to pool together into an
 # array. This results in a vector of arrays. 
 
-Biases = [random.uniform(low= -1, high= +1, size=[LayerSizes[j+1]]) for j in range(NumLayers)]
+Biases = [random.uniform(low= 0, high= +0.1, size=[LayerSizes[j+1]]) for j in range(NumLayers)]
 # indexing starts at +1 since we don't add baises to input. This results in a vector of vectors. 
 
 # # # Now to initialize variables for SGD as well # # #
@@ -46,13 +47,13 @@ db_layer = [zeros(LayerSizes[j+1]) for j in range(NumLayers)] # no biases in inp
 # # Now to define the batchsize and initialize the corresponding inputs and outputs
 # # define the number of batches we will run and the learning rate for our SGD as well
 
-batchsize = 100
+batchsize = 250
 
-y_in = random.uniform(low = -1, high = +1, size = [batchsize,LayerSizes[0]]) 
-y_out = random.uniform(low = -1, high = +1, size = [batchsize,LayerSizes[-1]]) # note: the -1 index means last
+y_in = random.uniform(low = 0, high = +0.1, size = [batchsize,LayerSizes[0]]) 
+y_out = random.uniform(low = 0, high = +0.1, size = [batchsize,LayerSizes[-1]]) # note: the -1 index means last
 
 eta = 0.001 # this is the learning rate
-batches = 2500 # This is the number of batches we will use to train of the data
+batches = 5000 # This is the number of batches we will use to train of the data
 
 costs=zeros(batches) # array to store the costs
 
@@ -61,11 +62,19 @@ costs=zeros(batches) # array to store the costs
 # this fucntion should taking a neuron value and apply our nonlinear function
 # we are using for this network. I will be using a sigmoid for this example. 
 
-def net_f_df(z): 
-    val = 1/(1 + exp(-z)) # This is the sigmoid nonlinear function
-    return(val, exp(-z)*val**2) # This returned the value and also the
+# In[2]
+
+#def net_f_df(z): 
+#   val = 1/(1 + exp(-z)) # This is the sigmoid nonlinear function
+#    return(val, exp(-z)*val**2) # This returned the value and also the
                                 # derivative which we will need for the SGD
                                 
+# For a change: Set up rectified linear units (relu) 
+# instead of sigmoid
+def net_f_df(z): # calculate f(z) and f'(z)
+    
+    return(maximum(0,z),1*(z>0)) # return both f and f'
+
 
 # now we want to have a function to move the network forward one step
 
@@ -115,8 +124,8 @@ def backprop(y_target, y_layer, df_layer, Weights, Biases, NumLayers, dw_layer, 
 def gradient_step(eta, dw_layer, db_layer, Weights, Biases):
     
     for j in range(NumLayers):
-        Weights[j] = -eta*dw_layer[j] # nicely can act and replace whole arrays in this fashion
-        Biases[j] = -eta*db_layer[j]
+        Weights[j] -= eta*dw_layer[j] # nicely can act and replace whole arrays in this fashion
+        Biases[j] -= eta*db_layer[j]
     return(Weights, Biases)
     
 # Now to define the function for the training of the network, biggest difference of not using global should 
@@ -146,6 +155,13 @@ def make_batch(batchsize):
     targets[:, 0] = myFunc(inputs[:, 0],inputs[:, 1]) # this generates the target value at the x, y points
     return(inputs, targets) # think of this as y_in and y_target for the other functions
 
+# In[3] ## Debugging
+#y_in,y_target = make_batch(batchsize)
+#test1,test2,test3 = apply_net(y_in, Weights, Biases, NumLayers, y_layer, df_layer)
+#test4,test5 = backprop(y_target, y_layer, df_layer, Weights, Biases, NumLayers, dw_layer, db_layer, batchsize)
+#Weights,Biases = gradient_step(eta, dw_layer, db_layer, Weights, Biases)
+
+# In[4]
 # # finally we shoud be at the point where we run the network and train it
 
 for k in range(batches):
@@ -157,6 +173,45 @@ plt.plot(costs)
 plt.title("Cost function during training")
 plt.show()
 
+# In[5]
+
 # # Lastly is to figure out how to plot the result!
 
+# import functions for updating display 
+# (simple animation)
+from IPython.display import clear_output
+from time import sleep
 
+eta1 = 0.005 # learning rate
+nsteps = 100
+
+xrange=linspace(-0.5,0.5,40)
+X0,X1=meshgrid(xrange,xrange)
+test_batchsize=shape(X0)[0]*shape(X0)[1]
+testsample=zeros([test_batchsize,2])
+testsample[:,0]=X0.flatten()
+testsample[:,1]=X1.flatten()
+
+
+costs=zeros(nsteps)
+for j in range(nsteps):
+    clear_output(wait=True)
+    fig,ax = plt.subplots(ncols=3, nrows=1, figsize=(8, 4)) # prepare figure
+    ax[1].axis('off') # no axes
+    ax[2].axis('off')
+    
+    # the crucial lines:
+    y_in,y_target = make_batch(batchsize) # random samples (points in 2D)
+    costs[j],y_layer,df_layer,dw_layer,db_layer,Weights,Biases,y_out_result = train_net(y_in, y_target, eta1, Weights, Biases, NumLayers, y_layer, df_layer, dw_layer, db_layer, batchsize) # train network (one step, on this batch)
+    testoutput,one,two=apply_net(testsample, Weights, Biases, NumLayers, y_layer, df_layer) # check the new network output in the plane
+    
+    img=ax[1].imshow(reshape(testoutput,shape(X0)),interpolation='nearest',origin='lower') # plot image
+    ax[2].imshow(myFunc(X0,X1),interpolation='nearest',origin='lower')
+    ax[0].plot(costs)
+    
+    ax[0].set_title("Cost during training")
+    ax[0].set_xlabel("number of batches")
+    ax[1].set_title("Current network prediction")
+    ax[2].set_title("Target Result")
+    plt.show()
+    sleep(0.05)
