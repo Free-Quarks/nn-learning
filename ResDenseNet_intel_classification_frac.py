@@ -1,15 +1,21 @@
+# This code we are going to try to implement the Residual part of a Resnet onto the DenseNet at the 
+# point of the tranisition layers, allowing us to "bypass" each dense block if needed to (hopefully) improve
+# the learning rate and reduce the generalization error while training over a large number of epochs
+
 
 # In[1] imports
 import matplotlib.pyplot as plt
 import numpy as np
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.layers import Input, Dense, Dropout, Activation, Concatenate, BatchNormalization
+from tensorflow.keras.layers import Input, Dense, Dropout, Activation, Concatenate, BatchNormalization, ZeroPadding2D
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Conv2D, GlobalAveragePooling2D, AveragePooling2D, Flatten
+from tensorflow.keras.layers import Conv2D, GlobalAveragePooling2D, AveragePooling2D, Flatten, Add, MaxPool2D
 from tensorflow.keras.regularizers import l2
+from tensorflow.nn import fractional_avg_pool
 from tensorflow.keras.callbacks import TensorBoard
 import tensorflow as tf
 import time
+
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
@@ -23,7 +29,7 @@ if gpus:
         # Memory growth must be set before GPUs have been initialized
         print(e)
 
-NAME = "DenseNet_intel-6x7x2x2-{}".format(int(time.time())) # layers x growth_rate x dropout x bottleneck
+NAME = "ResDenseNet_intel_frac_deep-4x6x0x2-{}".format(int(time.time())) # layers x growth_rate x dropout x bottleneck
 
 tensorboard = TensorBoard(log_dir='logs/{}'.format(NAME))
 
@@ -47,15 +53,15 @@ test_set = test_datagen.flow_from_directory('Data/seg_test',
 # In[3] Variables and hyperparameters
 
 img_input = Input(shape=(150,150,3)) # image input shape
-growth_rate = 7 # how the number of filters grows
+growth_rate = 6 # how the number of filters grows
 nb_channels = 2*growth_rate # number of starting channels/filters
 weight_decay = 1e-4 # decay rate for weights
-dropout_rate = 0.2 # dropout rate
+dropout_rate = 0 # dropout rate
 bottleneck_width = 2 # relates to size of bottleneck in filters
 nb_classes = 6 # number of classes
 compression_level = 1 # how much compression is used, 1=none
 activation_func = 'swish' # what the activation function is for the whole net
-nb_layers = 6 # number of densely connected layers in one dense block
+nb_layers = 4 # number of densely connected layers in one dense block
 
 
 
@@ -63,7 +69,7 @@ nb_layers = 6 # number of densely connected layers in one dense block
 # In[4] setting up functions for network
 
 def dense_block(x, nb_layers, nb_channels, growth_rate, dropout_rate, bottleneck_width, weight_decay):
-        # This is the dense block function which concats the different sub-blocks being the conv blocks
+    # This is the dense block function which concats the different sub-blocks being the conv blocks
     x_list = [x]
     for i in range(nb_layers):
         cb = convolution_block(x, growth_rate, dropout_rate, bottleneck_width, weight_decay)
@@ -73,16 +79,16 @@ def dense_block(x, nb_layers, nb_channels, growth_rate, dropout_rate, bottleneck
     return x, nb_channels
 
 def convolution_block(x, nb_channels, dropout_rate, bottleneck_width, weight_decay):
-        # this 1 subblock which gets concat'd to other blocks like itself. includes bottleneck in filters too
+    # this 1 subblock which gets concat'd to other blocks like itself. includes bottleneck in filters too
     x = BatchNormalization(gamma_regularizer=l2(weight_decay), beta_regularizer=l2(weight_decay))(x)
     x = Activation(activation_func)(x)
     x = Conv2D(nb_channels * bottleneck_width, (1, 1), padding='same', use_bias=False, kernel_regularizer=l2(weight_decay))(x)       
     x = Dropout(dropout_rate)(x)
     
-    # Standard (BN-ReLU-Conv)
+    # Standard (BN-ReLU-Conv), debating if last convolution should have an activation function
     x = BatchNormalization(gamma_regularizer=l2(weight_decay), beta_regularizer=l2(weight_decay))(x)
     x = Activation(activation_func)(x)
-    x = Conv2D(nb_channels, (3, 3), activation=activation_func, padding='same', use_bias=False, kernel_regularizer=l2(weight_decay))(x)       
+    x = Conv2D(nb_channels, (3, 3), padding='same', use_bias=False, kernel_regularizer=l2(weight_decay))(x)       
     x = Dropout(dropout_rate)(x)
     
     return x
@@ -95,8 +101,9 @@ def transition_layer(x, nb_channels, dropout_rate, compression_level, weight_dec
     x = Activation(activation_func)(x)
     x = Conv2D(int(nb_channels*compression_level), (1, 1), padding='same',
                       use_bias=False, kernel_regularizer=l2(weight_decay))(x)    
-    x = Dropout(dropout_rate)(x)    
-    x = AveragePooling2D((2, 2), strides=(2, 2))(x)
+    x = Dropout(dropout_rate)(x)
+    x = ZeroPadding2D(padding=(1,1))(x)     # adds padding of 0 to the edges of the images so we can make the network deeper
+    x = MaxPool2D((2, 2), strides=(2, 2))(x) 
     return x
 
 # In[5] This is the net 
@@ -105,25 +112,59 @@ def transition_layer(x, nb_channels, dropout_rate, compression_level, weight_dec
 x = Conv2D(nb_channels, (3,3), padding='same',strides=(1,1),
                       use_bias=False, kernel_regularizer=l2(weight_decay))(img_input)
 
+# in order to get dimensional matches for the residual adding we are going to run an additional conv to get a bypass 
+# path, each dense block spits out nb_channels + 4*growth_rate (32) for the new max channel numbers
+x_bypass =  Conv2D(nb_channels+nb_layers*growth_rate, (1,1), padding='same',strides=(1,1),
+                      use_bias=False, kernel_regularizer=l2(weight_decay))(x)
 # this starts the series of dense blockd and transition layers
 x,nb_channels = dense_block(x, nb_layers, nb_channels, growth_rate, dropout_rate, bottleneck_width, weight_decay)
+# here is the residual bypass
+x = Add()([x, x_bypass])
+# transition layers take in a linear input
+x = transition_layer(x, nb_channels, dropout_rate, compression_level, weight_decay)
+# settin up new bypass of correct dimensions
+x_bypass =  Conv2D(nb_channels+nb_layers*growth_rate, (1,1), padding='same',strides=(1,1),
+                      use_bias=False, kernel_regularizer=l2(weight_decay))(x)
+# repeat
+x,nb_channels = dense_block(x, nb_layers, nb_channels, growth_rate, dropout_rate, bottleneck_width, weight_decay)
+
+x = Add()([x, x_bypass])
 
 x = transition_layer(x, nb_channels, dropout_rate, compression_level, weight_decay)
 
+x_bypass =  Conv2D(nb_channels+nb_layers*growth_rate, (1,1), padding='same',strides=(1,1),
+                      use_bias=False, kernel_regularizer=l2(weight_decay))(x)
+
 x,nb_channels = dense_block(x, nb_layers, nb_channels, growth_rate, dropout_rate, bottleneck_width, weight_decay)
+
+x = Add()([x, x_bypass])
 
 x = transition_layer(x, nb_channels, dropout_rate, compression_level, weight_decay)
 
+x_bypass =  Conv2D(nb_channels+nb_layers*growth_rate, (1,1), padding='same',strides=(1,1),
+                      use_bias=False, kernel_regularizer=l2(weight_decay))(x)
+
 x,nb_channels = dense_block(x, nb_layers, nb_channels, growth_rate, dropout_rate, bottleneck_width, weight_decay)
+
+x = Add()([x, x_bypass])
 
 x = transition_layer(x, nb_channels, dropout_rate, compression_level, weight_decay)
 
+x_bypass =  Conv2D(nb_channels+nb_layers*growth_rate, (1,1), padding='same',strides=(1,1),
+                      use_bias=False, kernel_regularizer=l2(weight_decay))(x)
+
 x,nb_channels = dense_block(x, nb_layers, nb_channels, growth_rate, dropout_rate, bottleneck_width, weight_decay)
+
+x = Add()([x, x_bypass])
 
 x = transition_layer(x, nb_channels, dropout_rate, compression_level, weight_decay)
 
-x,nb_channels = dense_block(x, nb_layers, nb_channels, growth_rate, dropout_rate, bottleneck_width, weight_decay)
+x_bypass =  Conv2D(nb_channels+nb_layers*growth_rate, (1,1), padding='same',strides=(1,1),
+                      use_bias=False, kernel_regularizer=l2(weight_decay))(x)
 
+x,nb_channels = dense_block(x, nb_layers, nb_channels, growth_rate, dropout_rate, bottleneck_width, weight_decay)
+# adding an additional bypass here
+x = Add()([x, x_bypass])
 # this ends the net
 x = BatchNormalization(gamma_regularizer=l2(weight_decay), beta_regularizer=l2(weight_decay))(x)
 x = Activation(activation_func)(x)
@@ -146,3 +187,4 @@ net_model = Net.fit_generator(training_set,
                         callbacks=[tensorboard])
 
 # opening tensorboard: conda activate tf_gpu && tensorboard --logdir=logs/
+# %%
